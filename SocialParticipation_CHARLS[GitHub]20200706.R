@@ -12,6 +12,7 @@ library(here)
 library(haven)
 library(dplyr)
 library(poLCA)
+library(tidyLPA)
 library(reshape2)
 library(ggplot2)
 library(psych)
@@ -72,12 +73,38 @@ levels(healthsts$otheract)[3] <- "3 Not Regularly"
 healthsts$otheract <- factor(healthsts$otheract, levels = lvls)
 healthsts$otheract[is.na(healthsts$otheract)] <- "4 Never"
 
+# aggregated item response
+spresponse <- melt(spitems) %>%
+  group_by(Var2, value) %>%
+  mutate(count = n()) %>%
+  dplyr::select(-Var1) %>%
+  unique() %>%
+  arrange(Var2, value)
+
+item.response <- ggplot(data = spresponse, aes(x = Var2, y = count, fill = as.factor(value))) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_brewer(palette = "Greys", direction = -1, labels = c("Almost Daily", "Almost Every Week", "Not Regularly", "Never")) + 
+  labs(x = "Social Particiaption Item", y = "Response Proportion", fill = "Item Response", caption = "Source: CHARLS 2015") +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        plot.caption = element_text(size = 12, face = "italic"),
+        legend.position = "bottom",
+        legend.title = element_text(size = 14, face = "bold"),
+        legend.text = element_text(size = 14),
+        legend.box.background = element_rect(color = "black"),
+        axis.title = element_text(size = 16, face = "bold"),
+        axis.text.x = element_text(size = 16, angle = 30, vjust = 0.6),
+        axis.text.y = element_text(size = 14))
+
+print(item.response)
+
+ggsave("table_and_figure/item_response.png", plot = item.response, width = 10, height = 8)
+
 ### latent class analysis (poLCA package) ###
 set.seed(2048)
 
 # store the goodness of fitness results as a datafram
-lca.fitness <- data.frame(matrix(nrow = 0, ncol = 4))
-colnames(lca.fitness) <- c("N Class","G2", "BIC","Entropy")
+lca.fitness <- data.frame(matrix(nrow = 0, ncol = 5))
+colnames(lca.fitness) <- c("N Class", "Res.DF", "LL", "BIC", "Entropy")
 
 # fit the LCA model looping through 1- to 6-class
 spitems <- with(healthsts, cbind(friends, playcards, helpothers, gotoclub, organization, volunteer, careothers, takecourse, otheract))
@@ -85,12 +112,25 @@ spitems <- with(healthsts, cbind(friends, playcards, helpothers, gotoclub, organ
 for (i in 1:6) {
   lca.charls2015.ncls <- poLCA(spitems ~ 1, nclass = i, data = healthsts, nrep = 5, na.rm = TRUE, graphs = FALSE, maxiter = 100000)
   lca.fitness[i, "N Class"] = i
-  lca.fitness[i, "G2"] = lca.charls2015.ncls$Gsq
+  lca.fitness[i, "Res.DF"] = lca.charls2015.ncls$resid.df
+  lca.fitness[i, "LL"] = lca.charls2015.ncls$llik
   lca.fitness[i, "BIC"] = lca.charls2015.ncls$bic
   lca.fitness[i, "Entropy"] = poLCA.entropy(lca.charls2015.ncls)
 }
 
 lca.fitness #The 4-class model have the smallest BIC among all models
+
+# the LMR (Lo-Mendell-Rubin) Ad-Hoc Adjusted Likelihood Ratio Test
+for (i in 2:6) {
+  LMRtest <- tidyLPA::calc_lrt(n = lca.charls2015.ncls$Nobs,
+                    null_ll = lca.fitness$LL[i-1], null_param = lca.charls2015.ncls$Nobs - lca.fitness$Res.DF[i-1], null_classes = i-1,
+                    alt_ll = lca.fitness$LL[i], alt_param = lca.charls2015.ncls$Nobs - lca.fitness$Res.DF[i], alt_classes = i)
+  cat("While the alternative model has ", i, "classes and the null model has", i-1, "classes \n")
+  print(LMRtest)
+  cat("\n","\n")
+}
+
+lca.fitness$LMRlrtest <- c(NA, 5112.744, 614.289, 374.481, 164.488, 142.423)
 
 # predicted class from 4-class model
 lca.charls2015.ncls4 <- poLCA(spitems ~ 1, nclass = 4, data = healthsts, nrep = 5, na.rm = TRUE, graphs = FALSE, maxiter = 100000)
@@ -104,17 +144,30 @@ lca.reorder <- poLCA(spitems ~ 1, nclass = 4, data = healthsts, nrep = 5, na.rm 
 
 plot(lca.reorder)
 
+# name the yielded latent classes
 healthsts$spclass <- lca.reorder$predclass
 
-# name the yielded latent classes
 healthsts$spclass <- factor(healthsts$spclass, levels = c(1, 2, 3, 4), labels = c("1 society-oriented", "2 recreational", "3 occasional", "4 non-participated"))
 healthsts$spclass <- relevel(healthsts$spclass, ref = 4)
 table(healthsts$spclass, useNA = "ifany")
 
-# plot the LCA results
-lca.probs <- melt(lca.reorder$probs, level = 2)
+# class-conditional outcome probabilities
+cond.prob <- matrix(ncol = 4)
 
-lca.probs$Var1 <- recode(lca.probs$Var1, "class 1: " = "Society-oriented", "class 2: " = "Recreational", "class 3: " = "Occasional", "class 4: " = "Non-particiapted")
+for (x in lca.reorder$probs) {
+  cond.prob <- rbind(cond.prob, t(as.matrix(x)))
+}
+
+cond.prob <- as.data.frame(cond.prob[-1, ])
+cond.prob[["Response"]] <- rep(c("Almost Daily", "Almost Every Week", "Not Regularly", "Never"), time = 9)
+cond.prob[["Activity"]] <- rep(c("Friends", "Playcards", "Helpothers", "Gotoclubs", "Organization", "Volunteer", "Careothers", "Takecourse", "Others"), each = 4)
+colnames(cond.prob) <- c("Society-oriented", "Recreational", "Occasional", "Non-participated", "Response", "Activity")
+cond.prob <- cond.prob[, c(6,5,1,2,3,4)]
+
+# plot the LCA results
+lca.probs <- reshape2::melt(lca.reorder$probs, level = 2)
+
+lca.probs$Var1 <- recode(lca.probs$Var1, "class 1: " = "Society-oriented", "class 2: " = "Recreational", "class 3: " = "Occasional", "class 4: " = "Non-participated")
 lca.probs$Var2 <- recode(lca.probs$Var2, "Pr(1)" = "Almost Daily", "Pr(2)" = "Almost Weekly", "Pr(3)" = "Not Regularly", "Pr(4)" = "Never")
 
 zp1 <- ggplot(lca.probs, aes(x = L2, y = value, fill = Var2)) +
@@ -171,7 +224,51 @@ for (col in colnames(spitems)){
 }
 healthsts$participation <- factor(healthsts$participation, levels = c(0,1), labels = c("0 No", "1 Yes"), ordered = TRUE)
 
+## status in quo of social participation
+table(healthsts$spclass)
+MultinomCI(table(healthsts$spclass), conf.level = 0.95)*100
+
 table(healthsts$participation)
+BinomCI(length(healthsts$participation[healthsts$participation == "1 Yes"]), nrow(healthsts), conf.level = 0.95) * 100
+
+crosstab <- table(healthsts$spclass, healthsts$participation)
+prop.table(crosstab, 2)
+summary(table(healthsts$spclass, healthsts$participation))
+
+# participation classification
+plot.spclass <- ggplot(data = healthsts, aes(x = factor(spclass))) +
+  geom_bar(stat = "count", width = 0.6, fill = "white", colour = "black") +
+  geom_text(stat='count', aes(label=..count..), vjust = -0.6, size = 5) +
+  ylim(0, 17000) +
+  labs(x = "Latent Class", y = "Count", caption = " ") +
+  scale_x_discrete(labels = c("Society-oriented", "Recreational", "Occasional", "Non-participated")) +
+  theme(panel.background = element_rect(fill = "white", colour = "black", linetype = "solid"),
+        plot.caption = element_text(size = 12, face = "italic"),
+        axis.title = element_text(size = 16, face = "bold"),
+        axis.text.x = element_text(size = 16),
+        axis.text.y = element_text(size = 14))
+
+print(plot.spclass)
+
+plot.participation <- ggplot(data = healthsts, aes(x = factor(participation))) +
+  geom_bar(stat = "count", width = 0.5, fill = "white", colour = "black") + 
+  geom_text(stat='count', aes(label=..count..), vjust = -0.6, size = 5) +
+  ylim(0, 17000) +
+  labs(x = "Participator", y = "Count", caption = "Source: CHARLS 2015") +
+  scale_x_discrete(labels = c("Participator", "Non-participator")) +
+  theme(panel.background = element_rect(fill = "white", colour = "black", linetype = "solid"),
+        plot.caption = element_text(size = 12, face = "italic"),
+        axis.title = element_text(size = 16, face = "bold"),
+        axis.text.x = element_text(size = 16),
+        axis.text.y = element_text(size = 14))
+
+print(plot.participation)
+
+plot.spmembership <- ggarrange(plot.spclass, plot.participation, nrow = 1, widths = c(1.5,1))
+
+print(plot.spmembership)
+
+ggsave("table_and_figure/spmembership.png", plot = plot.spmembership, width = 13, height = 8)
 
 ## load CHARLS 2015 demography information data
 demography <- read_dta("CHARLS2015/Demographic_Background.dta")
@@ -252,6 +349,8 @@ healthsts$srhealth <- relevel(healthsts$srhealth, ref = "5 Poor")
 phyhard.alpha <- psych::alpha(dplyr::select(healthsts, db001, db004, db005, db006, db007, db008, db009), na.rm = TRUE) #Cronbach's alpha = 0.78
 
 healthsts$phyfunction <- phyhard.alpha$scores
+
+summary(healthsts$phyfunction)
 
 # ADL (activities of daily living)
 healthsts <- healthsts %>%
@@ -335,6 +434,8 @@ healthsts$delaywordscore[healthsts$delaywordscore == 0 & is.na(healthsts$dc027s1
 healthsts <- healthsts %>%
   mutate(MMSEscore = rowSums(cbind(crtyear, crtmonth, crtday, crtwkday, crtseason, wordscore, calcuscore, drawing, delaywordscore), na.rm = TRUE),
          miss.MMSE = rowSums(is.na(cbind(crtyear, crtmonth, crtday, crtwkday, crtseason, wordscore, calcuscore, drawing, delaywordscore))))
+
+summary(healthsts$MMSEscore)
 
 # Depression (measured by CES-D scale)
 healthsts$depress1 <- healthsts$dc009 - 1
@@ -651,67 +752,6 @@ BinomCI(length(complete.charls2015$participation[complete.charls2015$participati
 table(complete.charls2015$spclass, complete.charls2015$participation)
 summary(table(complete.charls2015$spclass, complete.charls2015$participation))
 
-spresponse <- melt(spitems) %>%
-  group_by(Var2, value) %>%
-  mutate(count = n()) %>%
-  dplyr::select(-Var1) %>%
-  unique() %>%
-  arrange(Var2, value)
-
-# aggregated item response
-item.response <- ggplot(data = spresponse, aes(x = Var2, y = count, fill = as.factor(value))) +
-  geom_bar(stat = "identity", position = "fill") +
-  scale_fill_brewer(palette = "Greys", direction = -1, labels = c("Almost Daily", "Almost Every Week", "Not Regularly", "Never")) + 
-  labs(x = "Social Particiaption Item", y = "Response Proportion", fill = "Item Response", caption = "Source: CHARLS 2015") +
-  theme(panel.background = element_rect(fill = "white", colour = "black"),
-        plot.caption = element_text(size = 12, face = "italic"),
-        legend.position = "bottom",
-        legend.title = element_text(size = 14, face = "bold"),
-        legend.text = element_text(size = 14),
-        legend.box.background = element_rect(color = "black"),
-        axis.title = element_text(size = 16, face = "bold"),
-        axis.text.x = element_text(size = 16, angle = 30, vjust = 0.6),
-        axis.text.y = element_text(size = 14))
-
-print(item.response)
-
-ggsave("table_and_figure/item_response.png", plot = item.response, width = 10, height = 8)
-
-# participation classification
-plot.spclass <- ggplot(data = complete.charls2015, aes(x = factor(spclass))) +
-  geom_bar(stat = "count", width = 0.6, fill = "white", colour = "black") + 
-  geom_text(stat='count', aes(label=..count..), vjust = -0.6, size = 5) +
-  ylim(0,5250) +
-  labs(x = "Latent Class", y = "Count", caption = " ") +
-  scale_x_discrete(labels = c("Society-oriented", "Recreational", "Occasional", "Non-participated")) +
-  theme(panel.background = element_rect(fill = "white", colour = "black", linetype = "solid"),
-        plot.caption = element_text(size = 12, face = "italic"),
-        axis.title = element_text(size = 16, face = "bold"),
-        axis.text.x = element_text(size = 16),
-        axis.text.y = element_text(size = 14))
-
-print(plot.spclass)
-
-plot.participation <- ggplot(data = complete.charls2015, aes(x = factor(participation))) +
-  geom_bar(stat = "count", width = 0.5, fill = "white", colour = "black") + 
-  geom_text(stat='count', aes(label=..count..), vjust = -0.6, size = 5) +
-  ylim(0,5250) +
-  labs(x = "Participator", y = "Count", caption = "Source: CHARLS 2015") +
-  scale_x_discrete(labels = c("Participator", "Non-participator")) +
-  theme(panel.background = element_rect(fill = "white", colour = "black", linetype = "solid"),
-        plot.caption = element_text(size = 12, face = "italic"),
-        axis.title = element_text(size = 16, face = "bold"),
-        axis.text.x = element_text(size = 16),
-        axis.text.y = element_text(size = 14))
-
-print(plot.participation)
-
-plot.spmembership <- ggarrange(plot.spclass, plot.participation, nrow = 1, widths = c(1.5,1))
-
-print(plot.spmembership)
-
-ggsave("table_and_figure/spmembership.png", plot = plot.spmembership, width = 13, height = 8)
-
 ## Descriptive Statistics
 
 # the dichotomous indicator
@@ -781,10 +821,10 @@ age.specific <- complete.charls2015 %>%
 plot.age.gender <- ggplot(data = age.specific, aes(x = agegp, y = participate, group = male)) +
   geom_point() + 
   geom_line(aes(linetype = male)) +
-  scale_y_continuous(labels = scales::percent, limits = c(0.1,0.4)) + 
+  scale_y_continuous(labels = scales::percent, limits = c(0,0.5)) + 
   labs(x = "Age Group", y = "% Participator", caption = "Source: CHARLS 2015") +
   scale_linetype_discrete(name = "Gender", labels = c("Female", "Male")) +
-  theme(legend.position = c(0.5, 0.1),
+  theme(legend.position = "bottom",
         legend.direction = "horizontal",
         legend.box = "horizontal",
         legend.text = element_text(size = 14),
